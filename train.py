@@ -430,6 +430,7 @@ def train(cfg: Config) -> None:
         if use_wandb:
             wandb.log({"sft/final_loss": loss.item()})
         print("SFT warmup complete.")
+        torch.cuda.empty_cache()
 
         # Post-SFT eval checkpoint
         if use_lora:
@@ -572,6 +573,7 @@ def train(cfg: Config) -> None:
         if torch.cuda.is_available():
             gpu_stats["gpu/memory_peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
             torch.cuda.reset_peak_memory_stats()
+            torch.cuda.empty_cache()
 
         # 3. EVALUATION (periodic, greedy)
         eval_metrics: dict[str, float] = {}
