@@ -12,7 +12,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import random
 import re
 from dataclasses import dataclass
 from time import perf_counter
@@ -21,6 +23,7 @@ os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
 import torch
+import torch.nn.functional as F
 import wandb
 from torch.nn.utils import clip_grad_norm_
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -33,9 +36,10 @@ from picorl.algorithms.ppo import (
     prepare_ppo_rollouts,
 )
 from picorl.algorithms.reinforce import compute_reinforce_loss
+from picorl.algorithms.utils import tokenize_with_assistant_mask
 from picorl.env import BatchedEnv
 from picorl.rollout import NanoLLM, make_generate_fn
-from picorl.types import Rollout
+from picorl.types import Message, Rollout
 
 
 # Difficulty tier -> approximate letter count label for wandb keys
@@ -69,6 +73,10 @@ class Config:
     ppo_clip_range: float = 0.2
     ppo_value_coef: float = 0.5
 
+    # SFT warmup
+    sft_steps: int = 0  # 0 to skip warmup
+    sft_num_examples: int = 100  # size of synthetic dataset
+
     # Sampling
     temperature: float = 1.0
     max_tokens: int = 512
@@ -96,6 +104,8 @@ def parse_args() -> Config:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.4)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--eval-num-tasks", type=int, default=32)
+    parser.add_argument("--sft-steps", type=int, default=0)
+    parser.add_argument("--sft-num-examples", type=int, default=100)
     parser.add_argument("--wandb-project", default="picorl")
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -114,6 +124,8 @@ def parse_args() -> Config:
         gpu_memory_utilization=args.gpu_memory_utilization,
         eval_every=args.eval_every,
         eval_num_tasks=args.eval_num_tasks,
+        sft_steps=args.sft_steps,
+        sft_num_examples=args.sft_num_examples,
         wandb_project=args.wandb_project,
     )
     cfg._no_wandb = args.no_wandb  # type: ignore[attr-defined]
@@ -248,6 +260,43 @@ def run_evaluation(
 
 
 # ---------------------------------------------------------------------------
+# SFT warmup
+# ---------------------------------------------------------------------------
+
+def generate_sft_example(difficulty: int) -> list[Message]:
+    """Generate a synthetic letter-counting example with a reasoning trace."""
+    env = LetterCountingEnv(difficulty=difficulty)
+    msgs = env.reset()  # [system, user]
+    question = msgs[1]["content"]
+
+    if len(env._target_letters) == 1:
+        letter = env._target_letters[0]
+        count = env._expected_counts[letter]
+        match = re.search(r"in the string (.+?)(?:\?|\n)", question)
+        text = match.group(1) if match else ""
+
+        spelled = ", ".join(text)
+        reasoning = f'Let me count each "{letter}" in "{text}":\n{spelled}\n'
+        reasoning += f'The letter "{letter}" appears {count} time{"s" if count != 1 else ""}.'
+        answer = f"\n<answer>{count}</answer>"
+    else:
+        match = re.search(r"in the string (.+?)(?:\n|$)", question)
+        text = match.group(1) if match else ""
+
+        spelled = ", ".join(text)
+        reasoning = f'Let me count each target letter in "{text}":\n{spelled}\n\n'
+        for letter in env._target_letters:
+            count = env._expected_counts[letter]
+            reasoning += f'"{letter}": {count} time{"s" if count != 1 else ""}\n'
+
+        answer_dict = json.dumps(env._expected_counts)
+        answer = f"\n<answer>{answer_dict}</answer>"
+
+    msgs.append({"role": "assistant", "content": reasoning + answer})
+    return msgs
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -289,6 +338,37 @@ def train(cfg: Config) -> None:
     use_wandb = not getattr(cfg, "_no_wandb", False)
     if use_wandb:
         wandb.init(project=cfg.wandb_project, config=vars(cfg))
+
+    # --- SFT WARMUP ---
+    if cfg.sft_steps > 0:
+        print(f"SFT warmup: {cfg.sft_steps} steps on {cfg.sft_num_examples} synthetic examples")
+        sft_data = [generate_sft_example(cfg.train_difficulty) for _ in range(cfg.sft_num_examples)]
+
+        model.train(True)
+        for step in range(cfg.sft_steps):
+            optimizer.zero_grad(set_to_none=True)
+            batch = random.sample(sft_data, min(cfg.num_tasks, len(sft_data)))
+            total_loss = 0.0
+            for msgs in batch:
+                input_ids, mask = tokenize_with_assistant_mask(tokenizer, msgs, device=device)
+                logits = model(input_ids.unsqueeze(0)).logits
+                shift_logits = logits[0, :-1, :]
+                shift_labels = input_ids[1:]
+                shift_mask = mask[1:]
+                ce = F.cross_entropy(shift_logits, shift_labels, reduction="none")
+                masked_ce = ce[shift_mask]
+                if masked_ce.numel() > 0:
+                    total_loss = total_loss + masked_ce.mean()
+            loss = total_loss / len(batch)
+            loss.backward()
+            grad_norm = clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            optimizer.step()
+            if step % 10 == 0:
+                print(f"  sft step={step:3d} loss={loss.item():.4f} grad_norm={grad_norm:.2f}")
+
+        if use_wandb:
+            wandb.log({"sft/final_loss": loss.item()}, step=-1)
+        print("SFT warmup complete.")
 
     # --- TRAINING LOOP ---
     for update in range(cfg.num_updates):
