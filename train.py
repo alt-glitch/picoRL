@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from time import perf_counter
 
 os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
 import torch
 import wandb
@@ -260,7 +261,7 @@ def train(cfg: Config) -> None:
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_id,
-        torch_dtype=getattr(torch, cfg.dtype),
+        dtype=getattr(torch, cfg.dtype),
         device_map="cuda",
     )
 
