@@ -271,7 +271,12 @@ class LetterCountingEnv(Env):
         ]
 
     def step(self, response: str) -> tuple[Message | None, float, bool]:
-        """Score response: 0.0 (no answer tags), 0.1 (wrong answer), 1.0 (correct)."""
+        """Score response with distance-based partial credit.
+
+        - 0.0: no <answer> tags (format failure)
+        - 0.1: has <answer> tags but answer is far off
+        - up to 1.0: closer answers score higher via 1 - distance/max_plausible
+        """
         expected_format = "single" if len(self._target_letters) == 1 else "multi"
         answer = _extract_answer(response, expected_format)
 
@@ -280,12 +285,19 @@ class LetterCountingEnv(Env):
 
         if isinstance(answer, int):
             expected = self._expected_counts[self._target_letters[0]]
-            correct = answer == expected
+            distance = abs(answer - expected)
+            max_plausible = max(expected, 10)
+            reward = max(0.1, 1.0 - distance / max_plausible)
         else:
-            correct = (
-                set(answer.keys()) == set(self._target_letters)
-                and all(answer[k] == self._expected_counts[k] for k in self._target_letters)
-            )
+            # Multi-letter: average per-letter distance score
+            if set(answer.keys()) != set(self._target_letters):
+                return None, 0.1, True
+            total_score = 0.0
+            for letter in self._target_letters:
+                expected = self._expected_counts[letter]
+                distance = abs(answer[letter] - expected)
+                max_plausible = max(expected, 10)
+                total_score += max(0.0, 1.0 - distance / max_plausible)
+            reward = max(0.1, total_score / len(self._target_letters))
 
-        reward = 1.0 if correct else 0.1
         return None, reward, True
