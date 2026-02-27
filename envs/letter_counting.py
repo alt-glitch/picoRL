@@ -271,11 +271,11 @@ class LetterCountingEnv(Env):
         ]
 
     def step(self, response: str) -> tuple[Message | None, float, bool]:
-        """Score response with distance-based partial credit.
+        """Score response with partial credit.
 
         - 0.0: no <answer> tags (format failure)
-        - 0.1: has <answer> tags but answer is far off
-        - up to 1.0: closer answers score higher via 1 - distance/max_plausible
+        - Single letter: 0.1 (wrong) or 1.0 (exact)
+        - Multi letter: 0.1 + 0.9 * (fraction of letters exactly correct)
         """
         expected_format = "single" if len(self._target_letters) == 1 else "multi"
         answer = _extract_answer(response, expected_format)
@@ -285,19 +285,15 @@ class LetterCountingEnv(Env):
 
         if isinstance(answer, int):
             expected = self._expected_counts[self._target_letters[0]]
-            distance = abs(answer - expected)
-            max_plausible = max(expected, 10)
-            reward = max(0.1, 1.0 - distance / max_plausible)
+            reward = 1.0 if answer == expected else 0.1
         else:
-            # Multi-letter: average per-letter distance score
             if set(answer.keys()) != set(self._target_letters):
                 return None, 0.1, True
-            total_score = 0.0
-            for letter in self._target_letters:
-                expected = self._expected_counts[letter]
-                distance = abs(answer[letter] - expected)
-                max_plausible = max(expected, 10)
-                total_score += max(0.0, 1.0 - distance / max_plausible)
-            reward = max(0.1, total_score / len(self._target_letters))
+            # Fraction of letters with exact count
+            n_correct = sum(
+                1 for l in self._target_letters
+                if answer[l] == self._expected_counts[l]
+            )
+            reward = 0.1 + 0.9 * (n_correct / len(self._target_letters))
 
         return None, reward, True
