@@ -340,6 +340,7 @@ def train(cfg: Config) -> None:
         dtype=getattr(torch, cfg.dtype),
         device_map="cuda",
     )
+    model.gradient_checkpointing_enable()
 
     llm = NanoLLM(
         model,
