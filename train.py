@@ -352,6 +352,17 @@ def train(cfg: Config) -> None:
         device_map="cuda",
     )
 
+    # NanoLLM FIRST — weight sharing binds to original HF param names.
+    # PEFT wrapping afterwards preserves original weight tensors inside
+    # base_layer, so merge_adapter() modifies the shared tensors in-place.
+    llm = NanoLLM(
+        model,
+        tokenizer=tokenizer,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
+        enable_sleep_mode=cfg.enable_sleep_mode,
+        max_model_len=cfg.max_model_len,
+    )
+
     if cfg.lora_rank > 0:
         from peft import LoraConfig, get_peft_model
 
@@ -367,14 +378,6 @@ def train(cfg: Config) -> None:
         model.enable_input_require_grads()
 
     model.gradient_checkpointing_enable()
-
-    llm = NanoLLM(
-        model,
-        tokenizer=tokenizer,
-        gpu_memory_utilization=cfg.gpu_memory_utilization,
-        enable_sleep_mode=cfg.enable_sleep_mode,
-        max_model_len=cfg.max_model_len,
-    )
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=cfg.lr,
