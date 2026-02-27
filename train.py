@@ -54,7 +54,7 @@ class Config:
 
     # Algorithm
     algo: str = "reinforce"  # reinforce | ppo
-    k: int = 1  # rollouts per task
+    k: int = 8  # rollouts per task (more = better advantage estimates)
 
     # Environment
     train_difficulty: int = 1  # tier 1 -> single letter in short words
@@ -93,7 +93,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(description="picoRL training")
     parser.add_argument("--algo", default="reinforce", choices=["reinforce", "ppo"])
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-0.5B-Instruct")
-    parser.add_argument("--k", type=int, default=1)
+    parser.add_argument("--k", type=int, default=8)
     parser.add_argument("--train-difficulty", type=int, default=3)
     parser.add_argument("--num-tasks", type=int, default=16)
     parser.add_argument("--num-updates", type=int, default=100)
@@ -220,6 +220,29 @@ def compute_ppo_explained_variance(batches) -> float:
     if var_returns < 1e-8:
         return 0.0
     return float(1.0 - (returns - values).var() / var_returns)
+
+
+def compute_hill_climbing_metrics(rollouts: list[Rollout]) -> dict[str, float]:
+    """Compute hill-climbing diagnostics: advantage magnitude and group variance."""
+    rewards = torch.tensor([sum(r.rewards) for r in rollouts])
+    advantages = rewards - rewards.mean()
+
+    # Group variance: fraction of groups where not all rollouts got same reward
+    groups: dict[int, list[float]] = {}
+    for r in rollouts:
+        gid = r.group_id if r.group_id is not None else id(r)
+        groups.setdefault(gid, []).append(sum(r.rewards))
+
+    groups_with_variance = sum(
+        1 for g in groups.values() if len(g) > 1 and max(g) != min(g)
+    )
+    total_groups = max(len(groups), 1)
+
+    return {
+        "hill/mean_abs_advantage": float(advantages.abs().mean()),
+        "hill/frac_groups_with_variance": groups_with_variance / total_groups,
+        "hill/format_compliance": compute_format_compliance(rollouts),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +393,31 @@ def train(cfg: Config) -> None:
             wandb.log({"sft/final_loss": loss.item()}, step=-1)
         print("SFT warmup complete.")
 
+        # Post-SFT eval checkpoint
+        model.train(False)
+        with torch.no_grad():
+            llm.wake_up()
+            check_envs = [
+                lambda: LetterCountingEnv(difficulty=cfg.train_difficulty)
+                for _ in range(32)
+            ]
+            check_rollouts = BatchedEnv(check_envs).collect_rollouts(
+                eval_generate_fn, tokenizer, k=1,
+            )
+        llm.sleep(1)
+
+        post_sft_compliance = compute_format_compliance(check_rollouts)
+        post_sft_reward = sum(sum(r.rewards) for r in check_rollouts) / max(len(check_rollouts), 1)
+        print(f"Post-SFT check: format_compliance={post_sft_compliance:.0%} "
+              f"mean_reward={post_sft_reward:.3f}")
+        if use_wandb:
+            wandb.log({
+                "sft/post_format_compliance": post_sft_compliance,
+                "sft/post_mean_reward": post_sft_reward,
+            }, step=-1)
+        if post_sft_compliance < 0.5:
+            print("WARNING: Post-SFT format compliance <50%. Consider increasing --sft-steps or checking LR.")
+
     # --- TRAINING LOOP ---
     for update in range(cfg.num_updates):
         iter_start = perf_counter()
@@ -396,6 +444,7 @@ def train(cfg: Config) -> None:
         # Compute rollout stats (shared across all algos)
         reward_stats = compute_reward_stats(rollouts)
         advantage_stats = compute_advantage_stats(rollouts)
+        hill_stats = compute_hill_climbing_metrics(rollouts)
 
         # 2. TRAIN
         model.train(True)
@@ -411,6 +460,7 @@ def train(cfg: Config) -> None:
             algo_metrics = {
                 "loss/policy": float(loss.item()),
                 "logprobs/mean_assistant": reinforce_metrics["avg_logprob"],
+                "hill/mean_neg_logprob": -reinforce_metrics["avg_logprob"],
             }
 
         elif cfg.algo == "ppo":
@@ -446,6 +496,7 @@ def train(cfg: Config) -> None:
                 "ppo/value_loss": value_metrics["value_loss"],
                 "ppo/explained_variance": compute_ppo_explained_variance(batches),
                 "logprobs/mean_assistant": prep_metrics["avg_logprob"],
+                "hill/mean_neg_logprob": -prep_metrics["avg_logprob"],
             }
 
         else:
@@ -480,6 +531,7 @@ def train(cfg: Config) -> None:
         log_data = {
             **reward_stats,
             **advantage_stats,
+            **hill_stats,
             **algo_metrics,
             **grad_stats,
             **gpu_stats,
