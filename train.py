@@ -144,7 +144,7 @@ def compute_reward_stats(rollouts: list[Rollout]) -> dict[str, float]:
     """Compute reward distribution stats from rollouts."""
     rewards = [sum(r.rewards) for r in rollouts]
     t = torch.tensor(rewards)
-    correct = sum(1 for r in rewards if r > 0)
+    correct = sum(1 for r in rewards if r >= 1.0)
     return {
         "reward/mean": float(t.mean()),
         "reward/std": float(t.std()) if len(rewards) > 1 else 0.0,
@@ -274,7 +274,7 @@ def run_evaluation(
         rollouts = BatchedEnv(env_fns).collect_rollouts(generate_fn, tokenizer, k=1)
 
         rewards = [sum(r.rewards) for r in rollouts]
-        correct = sum(1 for r in rewards if r > 0)
+        correct = sum(1 for r in rewards if r >= 1.0)
         accuracy = correct / max(len(rollouts), 1)
         compliance = compute_format_compliance(rollouts)
 
