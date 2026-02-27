@@ -85,6 +85,7 @@ class Config:
     # NanoLLM
     gpu_memory_utilization: float = 0.4
     enable_sleep_mode: bool = True
+    max_model_len: int = 4096
 
     # Logging
     wandb_project: str = "picorl"
@@ -103,6 +104,7 @@ def parse_args() -> Config:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.4)
+    parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--eval-num-tasks", type=int, default=32)
     parser.add_argument("--sft-steps", type=int, default=0)
@@ -123,6 +125,7 @@ def parse_args() -> Config:
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
         eval_every=args.eval_every,
         eval_num_tasks=args.eval_num_tasks,
         sft_steps=args.sft_steps,
@@ -343,6 +346,7 @@ def train(cfg: Config) -> None:
         tokenizer=tokenizer,
         gpu_memory_utilization=cfg.gpu_memory_utilization,
         enable_sleep_mode=cfg.enable_sleep_mode,
+        max_model_len=cfg.max_model_len,
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
