@@ -271,6 +271,7 @@ class LetterCountingEnv(Env):
         ]
 
     def step(self, response: str) -> tuple[Message | None, float, bool]:
+        """Score response: 0.0 (no answer tags), 0.1 (wrong answer), 1.0 (correct)."""
         expected_format = "single" if len(self._target_letters) == 1 else "multi"
         answer = _extract_answer(response, expected_format)
 
@@ -279,13 +280,12 @@ class LetterCountingEnv(Env):
 
         if isinstance(answer, int):
             expected = self._expected_counts[self._target_letters[0]]
-            reward = 1.0 if answer == expected else 0.0
+            correct = answer == expected
         else:
-            reward = (
-                1.0
-                if set(answer.keys()) == set(self._target_letters)
+            correct = (
+                set(answer.keys()) == set(self._target_letters)
                 and all(answer[k] == self._expected_counts[k] for k in self._target_letters)
-                else 0.0
             )
 
+        reward = 1.0 if correct else 0.1
         return None, reward, True

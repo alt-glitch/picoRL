@@ -1,11 +1,11 @@
 """
 picoRL training script.
 
-Supports REINFORCE and PPO on LetterCountingEnv with vLLM inference.
+Supports REINFORCE, PPO, and GRPO on LetterCountingEnv with vLLM inference.
 
 Usage:
     uv run python train.py --algo reinforce
-    uv run python train.py --algo ppo
+    uv run python train.py --algo grpo --sft-steps 50
     uv run python train.py --algo ppo --model-id Qwen/Qwen2.5-3B-Instruct
 """
 
@@ -35,6 +35,7 @@ from picorl.algorithms.ppo import (
     compute_ppo_value_loss,
     prepare_ppo_rollouts,
 )
+from picorl.algorithms.grpo import compute_grpo_loss
 from picorl.algorithms.reinforce import compute_reinforce_loss
 from picorl.algorithms.utils import tokenize_with_assistant_mask
 from picorl.env import BatchedEnv
@@ -53,7 +54,7 @@ class Config:
     dtype: str = "bfloat16"
 
     # Algorithm
-    algo: str = "reinforce"  # reinforce | ppo
+    algo: str = "reinforce"  # reinforce | ppo | grpo
     k: int = 8  # rollouts per task (more = better advantage estimates)
 
     # Environment
@@ -91,7 +92,7 @@ class Config:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description="picoRL training")
-    parser.add_argument("--algo", default="reinforce", choices=["reinforce", "ppo"])
+    parser.add_argument("--algo", default="reinforce", choices=["reinforce", "ppo", "grpo"])
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-0.5B-Instruct")
     parser.add_argument("--k", type=int, default=8)
     parser.add_argument("--train-difficulty", type=int, default=3)
@@ -497,6 +498,19 @@ def train(cfg: Config) -> None:
                 "ppo/explained_variance": compute_ppo_explained_variance(batches),
                 "logprobs/mean_assistant": prep_metrics["avg_logprob"],
                 "hill/mean_neg_logprob": -prep_metrics["avg_logprob"],
+            }
+
+        elif cfg.algo == "grpo":
+            loss, grpo_metrics = compute_grpo_loss(
+                rollouts, model, tokenizer, device=device,
+            )
+            loss.backward()
+            algo_metrics = {
+                "loss/policy": float(loss.item()),
+                "logprobs/mean_assistant": grpo_metrics["avg_logprob"],
+                "hill/mean_neg_logprob": -grpo_metrics["avg_logprob"],
+                "grpo/groups_with_variance": float(grpo_metrics["groups_with_variance"]),
+                "grpo/groups_skipped": float(grpo_metrics["groups_skipped"]),
             }
 
         else:
