@@ -82,6 +82,11 @@ class Config:
     temperature: float = 1.0
     max_tokens: int = 512
 
+    # LoRA
+    lora_rank: int = 0        # 0 = full fine-tuning (no LoRA)
+    lora_alpha: int = 16
+    lora_dropout: float = 0.0
+
     # NanoLLM
     gpu_memory_utilization: float = 0.4
     enable_sleep_mode: bool = True
@@ -107,6 +112,9 @@ def parse_args() -> Config:
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--eval-num-tasks", type=int, default=32)
+    parser.add_argument("--lora-rank", type=int, default=0)
+    parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--lora-dropout", type=float, default=0.0)
     parser.add_argument("--sft-steps", type=int, default=0)
     parser.add_argument("--sft-num-examples", type=int, default=100)
     parser.add_argument("--wandb-project", default="picorl")
@@ -126,6 +134,9 @@ def parse_args() -> Config:
         max_tokens=args.max_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
         eval_every=args.eval_every,
         eval_num_tasks=args.eval_num_tasks,
         sft_steps=args.sft_steps,
@@ -340,6 +351,21 @@ def train(cfg: Config) -> None:
         dtype=getattr(torch, cfg.dtype),
         device_map="cuda",
     )
+
+    if cfg.lora_rank > 0:
+        from peft import LoraConfig, get_peft_model
+
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            target_modules="all-linear",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        model.enable_input_require_grads()
+
     model.gradient_checkpointing_enable()
 
     llm = NanoLLM(
@@ -350,7 +376,9 @@ def train(cfg: Config) -> None:
         max_model_len=cfg.max_model_len,
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad], lr=cfg.lr,
+    )
     device = next(model.parameters()).device
 
     # Training sampling (stochastic)
@@ -364,6 +392,7 @@ def train(cfg: Config) -> None:
     eval_sampling = SamplingParams(temperature=0.0, max_tokens=cfg.max_tokens)
     eval_generate_fn = make_generate_fn(llm, eval_sampling)
 
+    use_lora = cfg.lora_rank > 0
     use_wandb = not getattr(cfg, "_no_wandb", False)
     if use_wandb:
         wandb.init(project=cfg.wandb_project, config=vars(cfg))
@@ -400,6 +429,8 @@ def train(cfg: Config) -> None:
         print("SFT warmup complete.")
 
         # Post-SFT eval checkpoint
+        if use_lora:
+            model.merge_adapter()
         model.train(False)
         with torch.no_grad():
             llm.wake_up()
@@ -411,6 +442,8 @@ def train(cfg: Config) -> None:
                 eval_generate_fn, tokenizer, k=1,
             )
         llm.sleep(1)
+        if use_lora:
+            model.unmerge_adapter()
 
         post_sft_compliance = compute_format_compliance(check_rollouts)
         post_sft_reward = sum(sum(r.rewards) for r in check_rollouts) / max(len(check_rollouts), 1)
@@ -429,6 +462,8 @@ def train(cfg: Config) -> None:
         iter_start = perf_counter()
 
         # 1. ROLLOUT (no grad)
+        if use_lora:
+            model.merge_adapter()
         model.train(False)
         with torch.no_grad():
             llm.wake_up()
@@ -442,6 +477,8 @@ def train(cfg: Config) -> None:
             )
             rollout_time = perf_counter() - rollout_start
         llm.sleep(1)
+        if use_lora:
+            model.unmerge_adapter()
 
         if not rollouts:
             print(f"update={update} skipped (no rollouts)")
@@ -537,6 +574,8 @@ def train(cfg: Config) -> None:
         eval_metrics: dict[str, float] = {}
         eval_table = None
         if cfg.eval_every > 0 and update % cfg.eval_every == 0:
+            if use_lora:
+                model.merge_adapter()
             model.train(False)
             with torch.no_grad():
                 llm.wake_up()
@@ -545,6 +584,8 @@ def train(cfg: Config) -> None:
                     cfg.eval_num_tasks, update, cfg.eval_examples,
                 )
             llm.sleep(1)
+            if use_lora:
+                model.unmerge_adapter()
 
         # 4. LOG
         log_data = {

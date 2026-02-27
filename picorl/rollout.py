@@ -120,7 +120,7 @@ def _bind_vllm_weights(vllm_model: Any, hf_model: Any) -> dict[str, int]:
 
     # Bind all other parameters
     hf_params = dict(hf_model.named_parameters())
-    prefixes = {"model.", "transformer."}
+    prefixes = {"model.", "transformer.", "base_model.model."}
     base_prefix = getattr(hf_model, "base_model_prefix", None)
     if isinstance(base_prefix, str) and base_prefix:
         prefixes.add(base_prefix + ".")
