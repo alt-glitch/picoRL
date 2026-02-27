@@ -260,7 +260,15 @@ class LetterCountingEnv(Env):
                 f"Provide your answer as JSON in the format: <answer>{example_json}</answer>"
             )
 
-        return [{"role": "user", "content": question}]
+        system = (
+            "You are a helpful assistant. Think step by step, then give your answer.\n"
+            "Always wrap your final answer in <answer> tags."
+        )
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ]
 
     def step(self, response: str) -> tuple[Message | None, float, bool]:
         expected_format = "single" if len(self._target_letters) == 1 else "multi"

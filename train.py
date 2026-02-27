@@ -53,7 +53,7 @@ class Config:
     k: int = 1  # rollouts per task
 
     # Environment
-    train_difficulty: int = 3  # tier 3 -> 2-3 target letters
+    train_difficulty: int = 1  # tier 1 -> single letter in short words
     num_tasks: int = 16
     eval_every: int = 10
     eval_difficulties: tuple[int, ...] = (3, 5, 6)  # train difficulty + harder
