@@ -390,7 +390,7 @@ def train(cfg: Config) -> None:
                 print(f"  sft step={step:3d} loss={loss.item():.4f} grad_norm={grad_norm:.2f}")
 
         if use_wandb:
-            wandb.log({"sft/final_loss": loss.item()}, step=-1)
+            wandb.log({"sft/final_loss": loss.item()})
         print("SFT warmup complete.")
 
         # Post-SFT eval checkpoint
@@ -414,7 +414,7 @@ def train(cfg: Config) -> None:
             wandb.log({
                 "sft/post_format_compliance": post_sft_compliance,
                 "sft/post_mean_reward": post_sft_reward,
-            }, step=-1)
+            })
         if post_sft_compliance < 0.5:
             print("WARNING: Post-SFT format compliance <50%. Consider increasing --sft-steps or checking LR.")
 
