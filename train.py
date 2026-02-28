@@ -1,5 +1,9 @@
 """
-picoRL training script.
+picoRL -- a minimal RL-for-LLMs training loop you can read top-to-bottom.
+
+The recipe: take a pretrained chat model, teach it a structured output FORMAT
+via supervised fine-tuning (SFT), then use reinforcement learning to improve
+the CONTENT of its answers using a reward signal (here, letter-counting accuracy).
 
 Supports REINFORCE, PPO, and GRPO on LetterCountingEnv with vLLM inference.
 
@@ -29,18 +33,18 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 
-from envs.letter_counting import LetterCountingEnv
-from picorl.algorithms.ppo import (
+from environments.letter_counting import LetterCountingEnv
+from algorithms.ppo import (
     compute_ppo_policy_loss,
     compute_ppo_value_loss,
     prepare_ppo_rollouts,
 )
-from picorl.algorithms.grpo import compute_grpo_loss
-from picorl.algorithms.reinforce import compute_reinforce_loss
-from picorl.algorithms.utils import tokenize_with_assistant_mask
-from picorl.env import BatchedEnv
-from picorl.rollout import NanoLLM, make_generate_fn
-from picorl.types import Message, Rollout
+from algorithms.grpo import compute_grpo_loss
+from algorithms.reinforce import compute_reinforce_loss
+from algorithms.common import tokenize_with_assistant_mask
+from core.batched_env import BatchedEnv
+from core.nanollm import NanoLLM, make_generate_fn
+from core.types import Message, Rollout
 
 
 # Difficulty tier -> approximate letter count label for wandb keys
@@ -401,6 +405,8 @@ def train(cfg: Config) -> None:
         wandb.init(project=cfg.wandb_project, config=vars(cfg))
 
     # --- SFT WARMUP ---
+    # Teach the model the output FORMAT before RL teaches the right CONTENT.
+    # Without this, the model outputs free-form text that can't be scored.
     if cfg.sft_steps > 0:
         print(f"SFT warmup: {cfg.sft_steps} steps on {cfg.sft_num_examples} synthetic examples")
         sft_data = [generate_sft_example(cfg.train_difficulty) for _ in range(cfg.sft_num_examples)]
@@ -462,10 +468,13 @@ def train(cfg: Config) -> None:
             print("WARNING: Post-SFT format compliance <50%. Consider increasing --sft-steps or checking LR.")
 
     # --- TRAINING LOOP ---
+    # The core RL loop: generate completions, score them, compute advantages, update weights.
     for update in range(cfg.num_updates):
         iter_start = perf_counter()
 
-        # 1. ROLLOUT (no grad)
+        # 1. ROLLOUT (no grad) -- generate k completions per task using vLLM.
+        # For LoRA: merge adapter weights first so vLLM sees the trained model,
+        # then unmerge after so PyTorch can train the LoRA parameters separately.
         if use_lora:
             model.merge_adapter()
         model.train(False)
@@ -493,7 +502,9 @@ def train(cfg: Config) -> None:
         advantage_stats = compute_advantage_stats(rollouts)
         hill_stats = compute_hill_climbing_metrics(rollouts)
 
-        # 2. TRAIN
+        # 2. TRAIN -- forward pass through HF model to get log-probabilities, then
+        # compute policy gradient loss. This is a DIFFERENT forward pass than generation:
+        # teacher-forced, processing the full sequence at once instead of autoregressive token-by-token.
         model.train(True)
         optimizer.zero_grad(set_to_none=True)
         grad_start = perf_counter()
@@ -575,7 +586,8 @@ def train(cfg: Config) -> None:
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.empty_cache()
 
-        # 3. EVALUATION (periodic, greedy)
+        # 3. EVALUATION (periodic, greedy) -- greedy decoding (temperature=0) on held-out
+        # difficulties. Tests whether the model actually learned vs got lucky with stochastic sampling.
         eval_metrics: dict[str, float] = {}
         eval_table = None
         if cfg.eval_every > 0 and update % cfg.eval_every == 0:

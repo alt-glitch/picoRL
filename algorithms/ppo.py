@@ -1,3 +1,37 @@
+"""PPO (Proximal Policy Optimization) -- included for comparison, not recommended.
+
+PPO solves a real problem: generating rollouts is expensive (you have to run
+inference on the full model), so you want to squeeze multiple gradient updates
+out of each batch of rollouts instead of throwing them away after one step.
+
+But naive reuse is dangerous -- after one gradient update, the model has changed,
+so the old rollouts no longer reflect the current policy. PPO adds two mechanisms
+to make reuse safe:
+
+1. **Clipping (trust region):** The ratio new_prob / old_prob measures how much
+   the policy has changed for each token. PPO clips this ratio to [1-eps, 1+eps]
+   so no single update can move the policy too far. Think of it as a speed limit
+   on learning.
+
+2. **Value head (learned baseline):** Instead of using a simple average reward as
+   the baseline (like REINFORCE) or a per-group average (like GRPO), PPO trains
+   a separate neural network head to *predict* the expected reward at each token
+   position. This gives per-token advantages via GAE (Generalized Advantage
+   Estimation), which can be more precise but adds a lot of complexity.
+
+Why the LLM community moved to GRPO:
+
+    PPO was designed for game-playing agents that take thousands of small actions.
+    LLMs take one "action" (generate a full response) and get one reward. The
+    per-token value head and GAE machinery add complexity without much benefit
+    in this setting. GRPO gets comparable results with a fraction of the code by
+    using the much simpler per-group baseline.
+
+This file has three main functions:
+    - prepare_ppo_rollouts: snapshot old log-probs + value estimates (frozen)
+    - compute_ppo_policy_loss: clipped surrogate objective
+    - compute_ppo_value_loss: value head regression loss
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,8 +39,8 @@ from typing import Any
 
 import torch
 
-from picorl.algorithms.utils import encode_chat_messages, get_per_token_logprobs
-from picorl.types import Rollout
+from algorithms.common import encode_chat_messages, get_per_token_logprobs
+from core.types import Rollout
 
 
 @dataclass(slots=True)

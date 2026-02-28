@@ -5,8 +5,8 @@ import random
 import re
 import string
 
-from picorl.env import Env
-from picorl.types import Message
+from environments.base import Env
+from core.types import Message
 
 # =============================================================================
 # Difficulty tiers (ported from Atropos)

@@ -1,7 +1,7 @@
 [project]
 name = "picorl"
-version = "0.1.0"
-description = "Minimal GRPO implementation for RL workshop"
+version = "0.2.0"
+description = "Minimal RL for LLMs — workshop edition"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -12,5 +12,9 @@ dependencies = [
     "accelerate>=1.0.0",
     "peft>=0.13.0",
     "wandb>=0.18.0",
+    "matplotlib>=3.8.0",
     "vllm>=0.7.0; sys_platform == 'linux'",
 ]
+
+[tool.setuptools.packages.find]
+include = ["algorithms*", "core*", "environments*"]

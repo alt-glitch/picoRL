@@ -1,11 +1,48 @@
+"""GRPO (Group Relative Policy Optimization) -- smarter baselines, same simplicity.
+
+GRPO uses the exact same loss as REINFORCE:
+
+    loss = -mean(advantage_i * logprob_i)
+
+The only difference is *how advantage is computed*. Instead of comparing each
+response to the batch average (which mixes easy and hard prompts), GRPO groups
+multiple completions for the *same* prompt and compares them to each other:
+
+    advantage_i = reward_i - mean(rewards in my group)
+
+This is the algorithm behind DeepSeek-R1 and most recent LLM RL work. It is
+simpler than PPO (no value network, no clipping, no GAE) and works better for
+LLMs because the per-group baseline gives a cleaner gradient signal.
+
+Concrete example with k=4 completions per prompt:
+
+    Prompt: "How many times does 'r' appear in 'strawberry'?"
+    Group rewards: [0, 1, 0, 0]   (only completion #2 got it right)
+    Group mean:    0.25
+    Advantages:    [-0.25, +0.75, -0.25, -0.25]
+
+    The correct completion gets a strong positive advantage (+0.75) and its
+    tokens are reinforced. The wrong completions get mild negative advantages
+    (-0.25) and their tokens are slightly suppressed. Compare this to a
+    batch-mean REINFORCE baseline that might be 0.05 if most other prompts
+    in the batch also scored low -- the signal would be much weaker.
+
+Why "group" matters for sparse rewards:
+
+    With binary reward (0 or 1) and ~5% accuracy, most k=8 groups will have
+    all-zero rewards and therefore zero advantage. These groups contribute
+    nothing to learning. The metric `groups_with_variance` tracks how many
+    groups actually have a useful training signal. If this number is very low,
+    you need more completions per prompt (larger k) or easier tasks.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
 
 import torch
 
-from picorl.algorithms.utils import get_per_token_logprobs, tokenize_with_assistant_mask
-from picorl.types import Rollout
+from algorithms.common import get_per_token_logprobs, tokenize_with_assistant_mask
+from core.types import Rollout
 
 
 def compute_grpo_loss(
@@ -33,7 +70,14 @@ def compute_grpo_loss(
     advantages = torch.zeros_like(rewards)
 
     groups_total = len(groups)
+    # groups_with_variance: groups where at least one completion scored
+    # differently from the others. These are the groups that actually produce
+    # a gradient signal. If all completions in a group got reward=0, the
+    # advantage for every completion is 0 and the group contributes nothing.
     groups_with_variance = 0
+    # groups_skipped: groups where all completions got the same reward (often
+    # all zeros). High values here mean the model rarely gets the answer right,
+    # so most groups are "wasted." Consider increasing k or lowering difficulty.
     groups_skipped = 0
 
     for indices in groups.values():
