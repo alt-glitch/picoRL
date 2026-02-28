@@ -2,7 +2,7 @@
 
 Minimal RL for LLMs. Three algorithms, one environment, one GPU.
 
-Workshop companion code for [Fifth Elephant](https://fiftheelephant.talkfunnel.com/).
+Workshop companion code for [Fifth Elephant](https://hasgeek.com/fifthelephant/building-reinforcement-learning-rl-for-llms-from-scratch/) RL Workshop.
 The audience builds LLM agents but has never touched training -- this repo
 makes the jump from *using* models to *training* them.
 
